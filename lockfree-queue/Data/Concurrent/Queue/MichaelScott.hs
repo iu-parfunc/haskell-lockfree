@@ -18,17 +18,18 @@ module Data.Concurrent.Queue.MichaelScott
    LinkedQueue(), newQ, nullQ, pushL, tryPopR, 
  )
   where
-
-import Data.IORef (readIORef, newIORef)
+ 
+import Data.CNFRef.Simple
+import Control.DeepSeq
 import System.IO (stderr)
 import Data.ByteString.Char8 (hPutStrLn, pack)
 
 -- import GHC.Types (Word(W#))
-import GHC.IORef(IORef(IORef))
+-- import GHC.CNFRef(CNFRef(CNFRef))
 import GHC.STRef(STRef(STRef))
 
 import qualified Data.Concurrent.Deque.Class as C
-import Data.Atomics (readForCAS, casIORef, Ticket, peekTicket)
+import Data.Atomics (Ticket, peekTicket)
 
 -- GHC 7.8 changed some primops
 #if MIN_VERSION_base(4,7,0)
@@ -50,27 +51,34 @@ import GHC.Prim
 -- import Data.MQueue.Class
 
 data LinkedQueue a = LQ 
-    { head :: {-# UNPACK #-} !(IORef (Pair a))
-    , tail :: {-# UNPACK #-} !(IORef (Pair a))
+    { head :: {-# UNPACK #-} !(CNFRef (Pair a))
+    , tail :: {-# UNPACK #-} !(CNFRef (Pair a))
     }
 
-data Pair a = Null | Cons a {-# UNPACK #-}!(IORef (Pair a))
+data Pair a = Null | Cons a {-# UNPACK #-}!(CNFRef (Pair a))
+
+-- instance NFData a => NFData (Pair a) where
+--   rnf Null = ()
+--   rnf (Cons !a !_) = rnf a
+instance NFData (Pair a) where
+  rnf _ = ()
+instance DeepStrict (Pair a)
 
 {-# INLINE pairEq #-}
 -- | This only checks that the node type is the same and in the case of a Cons Pair
 -- checks that the underlying MutVar#s are pointer-equal. This suffices to check
--- equality since each IORef is never used in multiple Pair values.
+-- equality since each CNFRef is never used in multiple Pair values.
 pairEq :: Pair a -> Pair a -> Bool
 pairEq Null       Null        = True
-pairEq (Cons _ (IORef (STRef mv1)))
-       (Cons _ (IORef (STRef mv2))) = sameMutVar# mv1 mv2
+pairEq (Cons _ ref1)
+       (Cons _ ref2) = ref1 == ref2
 pairEq _          _           = False
 
 -- | Push a new element onto the queue.  Because the queue can grow,
 --   this always succeeds.
 pushL :: forall a . LinkedQueue a -> a  -> IO ()
 pushL q@(LQ headPtr tailPtr) val = do
-   r <- newIORef Null
+   r <- newCNFRef Null
    let newp = Cons val r   -- Create the new cell that stores val.
        -- Enqueue loop: repeatedly read the tail pointer and attempt to extend the last pair.
        loop :: IO ()
@@ -89,27 +97,27 @@ pushL q@(LQ headPtr tailPtr) val = do
       -- There's a possibility for an infinite loop here with StableName based ptrEq.
       -- (And at one point I observed such an infinite loop.)
       -- But with one based on reallyUnsafePtrEquality# we should be ok.
-             (tailTicket', tail') <- readForCAS tailPtr   -- ANDREAS: used atomicModifyIORef here
+             (tailTicket', tail') <- readForCAS tailPtr   -- ANDREAS: used atomicModifyCNFRef here
              if not (pairEq tail tail') then loop
               else case next of 
 #else
              case peekTicket nextTicket of 
 #endif
                -- Here tail points (or pointed!) to the last node.  Try to link our new node.
-               Null -> do (b,newtick) <- casIORef nextPtr nextTicket newp
+               Null -> do (b,newtick) <- casCNFRef nextPtr nextTicket newp
                           case b of 
                             True -> do 
                               --------------------Exit Loop------------------
                               -- After the loop, enqueue is done.  Try to swing the tail.
                               -- If we fail, that is ok.  Whoever came in after us deserves it.
-                              _ <- casIORef tailPtr tailTicket newp
+                              _ <- casCNFRef tailPtr tailTicket newp
                               return ()
                               -----------------------------------------------
                             False -> loop 
                nxt@(Cons _ _) -> do 
                   -- Someone has beat us by extending the tail.  Here we
                   -- might have to do some community service by updating the tail ptr.
-                  _ <- casIORef tailPtr tailTicket nxt
+                  _ <- casCNFRef tailPtr tailTicket nxt
                   loop 
 
    loop -- Start the loop.
@@ -118,13 +126,13 @@ pushL q@(LQ headPtr tailPtr) val = do
 -- Check for: head /= tail, and head->next == NULL
 checkInvariant :: String -> LinkedQueue a -> IO ()
 checkInvariant s (LQ headPtr tailPtr) = 
-  do head <- readIORef headPtr
-     tail <- readIORef tailPtr
+  do head <- readCNFRef headPtr
+     tail <- readCNFRef tailPtr
      if (not (pairEq head tail))
        then case head of 
               Null -> error (s ++ " checkInvariant: LinkedQueue invariants broken.  Internal error.")
               Cons _ next -> do
-                next' <- readIORef next
+                next' <- readCNFRef next
                 case next' of 
                   Null -> error (s ++ " checkInvariant: next' should not be null")
                   _ -> return ()
@@ -156,7 +164,7 @@ tryPopR q@(LQ headPtr tailPtr) = loop 0
         nextTicket' <- readForCAS next
 #ifdef RECHECK_ASSUMPTIONS
         -- As with push, double-check our information is up-to-date. (head,tail,next consistent)
-        head' <- readIORef headPtr -- ANDREAS: used atomicModifyIORef headPtr (\x -> (x,x))
+        head' <- readCNFRef headPtr -- ANDREAS: used atomicModifyCNFRef headPtr (\x -> (x,x))
         if not (pairEq head head') then loop (tries+1) else do 
 #else
         let head' = head
@@ -169,7 +177,7 @@ tryPopR q@(LQ headPtr tailPtr) = loop 0
               Null -> return Nothing -- Queue is empty, couldn't dequeue
 	      next'@(Cons _ _) -> do
   	        -- Tail is falling behind.  Try to advance it:
-	        casIORef tailPtr tailTicket next'
+	        casCNFRef tailPtr tailTicket next'
 		loop (tries+1)
            
 	   else do -- head /= tail
@@ -180,7 +188,7 @@ tryPopR q@(LQ headPtr tailPtr) = loop 0
 --	        Null -> loop (tries+1)
 		next'@(Cons value _) -> do 
                   -- Try to swing Head to the next node
-		  (b,_) <- casIORef headPtr headTicket next'
+		  (b,_) <- casCNFRef headPtr headTicket next'
                   case b of
                     -- [2013.04.24] Looking at the STG, I can't see a way to get rid of the allocation on this Just:
                     True  -> return (Just value) -- Dequeue done; exit loop.
@@ -189,17 +197,17 @@ tryPopR q@(LQ headPtr tailPtr) = loop 0
 -- | Create a new queue.
 newQ :: IO (LinkedQueue a)
 newQ = do 
-  r <- newIORef Null
+  r <- newCNFRef Null
   let newp = Cons (error "LinkedQueue: Used uninitialized magic value.") r
-  hd <- newIORef newp
-  tl <- newIORef newp
+  hd <- newCNFRef newp
+  tl <- newCNFRef newp
   return (LQ hd tl)
 
 -- | Is the queue currently empty?  Beware that this can be a highly transient state.
 nullQ :: LinkedQueue a -> IO Bool
 nullQ (LQ headPtr tailPtr) = do 
-    head <- readIORef headPtr
-    tail <- readIORef tailPtr
+    head <- readCNFRef headPtr
+    tail <- readCNFRef tailPtr
     return (pairEq head tail)
 
 
