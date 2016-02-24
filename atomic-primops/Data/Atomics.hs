@@ -1,5 +1,9 @@
-{-# LANGUAGE  MagicHash, UnboxedTuples, ScopedTypeVariables, BangPatterns, CPP #-}
+{-# LANGUAGE BangPatterns             #-}
+{-# LANGUAGE CPP                      #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
+{-# LANGUAGE MagicHash                #-}
+{-# LANGUAGE ScopedTypeVariables      #-}
+{-# LANGUAGE UnboxedTuples            #-}
 
 -- | Provides atomic memory operations on IORefs and Mutable Arrays.
 --
@@ -45,22 +49,22 @@ module Data.Atomics
    fetchAddByteArrayInt
  ) where
 
-import Control.Exception (evaluate)
-import Data.Primitive.Array (MutableArray(MutableArray))
-import Data.Primitive.ByteArray (MutableByteArray(MutableByteArray))
+import Control.Exception        (evaluate)
 import Data.Atomics.Internal
+import Data.Primitive.Array     (MutableArray (MutableArray))
+import Data.Primitive.ByteArray (MutableByteArray (MutableByteArray))
 
 import Data.IORef
-import GHC.IORef hiding (atomicModifyIORef)
+import GHC.IORef  hiding (atomicModifyIORef)
 import GHC.STRef
 #if MIN_VERSION_base(4,7,0)
-import GHC.Prim hiding ((==#))
+import           GHC.Prim           hiding ((==#))
 import qualified GHC.PrimopWrappers as GPW
 #else
 import GHC.Prim
 #endif
-import GHC.Base (Int(I#))
-import GHC.IO (IO(IO))
+import GHC.Base (Int (I#))
+import GHC.IO   (IO (IO))
 -- import GHC.Word (Word(W#))
 
 
@@ -438,13 +442,13 @@ casMutVar2 mv tick new = IO$ \st ->
 --------------------------------------------------------------------------------
 
 -- | Memory barrier implemented by the GHC rts (see SMP.h).
-storeLoadBarrier :: IO ()
+-- storeLoadBarrier :: IO ()
 
 -- | Memory barrier implemented by the GHC rts (see SMP.h).
-loadLoadBarrier :: IO ()
+-- loadLoadBarrier :: IO ()
 
 -- | Memory barrier implemented by the GHC rts (see SMP.h).
-writeBarrier :: IO ()
+-- writeBarrier :: IO ()
 
 -- GHC 7.8 consistently exposes these symbols while linking:
 
